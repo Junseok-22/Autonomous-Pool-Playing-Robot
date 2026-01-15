@@ -1,1 +1,791 @@
-{"mode":"Text","hardwareTarget":"brain","textContent":"#pragma region VEXcode Generated Robot Configuration\n// Make sure all required headers are included.\n#include <stdio.h>\n#include <stdlib.h>\n#include <stdbool.h>\n#include <math.h>\n#include <string.h>\n\n\n#include \"vex.h\"\n\nusing namespace vex;\n\n// Brain should be defined by default\nbrain Brain;\n\n\n// START IQ MACROS\n#define waitUntil(condition)                                                   \\\n  do {                                                                         \\\n    wait(5, msec);                                                             \\\n  } while (!(condition))\n\n#define repeat(iterations)                                                     \\\n  for (int iterator = 0; iterator < iterations; iterator++)\n// END IQ MACROS\n\n\n// Robot configuration code.\ninertial BrainInertial = inertial();\nmotor MotorLeft = motor(PORT12, false);\nmotor MotorRight = motor(PORT8, false);\nmotor MotorBack = motor(PORT3, false);\nmotor Striker = motor(PORT11, false);\ndistance DistSensor = distance(PORT4);\ntouchled TouchLED5 = touchled(PORT5);\ncontroller Controller = controller();\n\n\n// generating and setting random seed\nvoid initializeRandomSeed(){\n  wait(100,msec);\n  double xAxis = BrainInertial.acceleration(xaxis) * 1000;\n  double yAxis = BrainInertial.acceleration(yaxis) * 1000;\n  double zAxis = BrainInertial.acceleration(zaxis) * 1000;\n  // Combine these values into a single integer\n  int seed = int(\n    xAxis + yAxis + zAxis\n  );\n  // Set the seed\n  srand(seed); \n}\n\n\n\nvoid vexcodeInit() {\n\n  // Initializing random seed.\n  initializeRandomSeed(); \n}\n\n\n// define variable for remote controller enable/disable\nbool RemoteControlCodeEnabled = true;\n\n#pragma endregion VEXcode Generated Robot Configuration\n\n//----------------------------------------------------------------------------\n//                                                                            \n//    Module:       main.cpp                                                  \n//    Author:       Mathew Chan, Seunghee Choi, Jun Kim, Austin Li                                                 \n//    Created:      {date}                                                    \n//    Description:  AUTONOMOUS POOL ROBOT                                                \n//                                                                            \n//----------------------------------------------------------------------------\n\n// Include the IQ Library\n#include \"iq_cpp.h\"\n#include \"cmath\"\n#include \"cstdio\"\n\n// Allows for easier use of the VEX Library\nusing namespace vex;\n\n//function prototypes\nint projectRay(int pos[], int tableWidth, int tableLength);\nint findBall (int pos[], int tableWidth, int tableLength);\ndouble kiwiToReal(double wheelTurns);\nvoid goToBall(int pos[]);\nvoid rotate90 (int direction);\nvoid configureAllSensors();\ndouble findOptimalAngle(double ballX, double ballY, int& pocketNum);\nvoid orbitBall (double targetHeading, int pocketNum);\nvoid configureCartesianPlane();\nvoid primeStriker();\nvoid strikeBall();\nvoid resetCoordinates(int pos[], int tableWidth, int tableLength);\nvoid findBallCentre(int ballDist);\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n//finds distance to wall from robot\nint projectRay(int pos[], int tableWidth, int tableLength)\n{\n  const int SENSOR_OFFSET = 105;\n  double angleInRad = BrainInertial.heading(degrees)*M_PI/180;\n  double xdist = 0, ydist = 0, dist = 0;\n\n  bool pointingUp = BrainInertial.heading(degrees) <= 90 || BrainInertial.heading(degrees) >= 270;\n\n  bool pointingRight = BrainInertial.heading(degrees) <=180;\n\n\n  //if pointing \"up-right\"\n  if (pointingUp && pointingRight)\n  {\n    xdist = tan(angleInRad) * (tableLength-pos[1]);\n    ydist = (tableWidth-pos[0]) / tan(angleInRad);\n\n    xdist = fmin (xdist, tableWidth-pos[0]);\n    ydist = fmin (ydist, tableLength-pos[1]);\n  }\n\n  //if pointing \"down-right\"\n  if (!pointingUp && pointingRight)\n  {\n    double refAngle = angleInRad - (M_PI/2);\n\n    xdist = pos[1] / tan(refAngle);\n    ydist = tan(refAngle) * (tableWidth-pos[0]);\n\n    xdist = fmin (xdist, tableWidth-pos[0]);\n    ydist = fmin (ydist, pos[1]);\n  }\n\n  // if pointing \"down-left\"\n  if (!pointingUp && !pointingRight)\n  {\n    double refAngle = angleInRad - (M_PI);\n\n    xdist = tan(refAngle) * pos[1];\n    ydist = pos[0] / tan(refAngle);\n\n    xdist = fmin (xdist, pos[0]);\n    ydist = fmin (ydist, pos[1]);\n  }\n\n  //if pointing \"up-left\"\n  if (pointingUp && !pointingRight)\n  {\n    double refAngle = angleInRad - (3*M_PI/2);\n    \n    xdist = (tableLength-pos[1]) / tan(refAngle);\n    ydist = tan(refAngle) * pos[0];\n\n    xdist = fmin (xdist, pos[0]);\n    ydist = fmin (ydist, tableLength-pos[1]);\n  }\n\n  //calculate distance to wall minus sensor offset\n  dist = sqrt (pow(xdist,2) + pow(ydist,2)) - SENSOR_OFFSET;\n\n  return (int) dist;\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\nvoid configureAllSensors()\n{\n  BrainInertial.calibrate();\n  wait(2,seconds);\n  BrainInertial.setHeading(0,degrees);\n  BrainInertial.setRotation(0,degrees);\n  MotorRight.setPosition(0,degrees);\n  MotorLeft.setPosition(0,degrees);\n  MotorBack.setPosition(0,degrees);\n  Striker.setPosition(0,degrees);\n  Brain.Timer.reset();\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * returns -1 if no ball found\n * returns distance to ball in mm\n * calculates position of ball\n */\nint findBall (int pos[], int tableWidth, int tableLength, int ballPos[])\n{\n  //already in position\n  const int MARGIN = 150;\n  const int PROXIMITY_MARGIN = 70;\n  const int checkCountMax = 40;\n  int checkCount = 0;\n\n  int currentRay = DistSensor.objectDistance(mm);\n  int prevRay = projectRay (pos, tableWidth, tableLength);\n\n  motor_group driveMotors(MotorLeft,MotorRight,MotorBack);\n\n  BrainInertial.setRotation(0,degrees);\n  driveMotors.setVelocity(15,percent);\n  driveMotors.spin(forward);\n\n  while (abs(BrainInertial.rotation(degrees)) < 360)\n  {\n\n    if (currentRay < projectRay (pos, tableWidth, tableLength) - MARGIN)\n    {\n      if (checkCount >= 1)\n      {\n        if (abs(currentRay - prevRay) <= PROXIMITY_MARGIN)\n          checkCount ++;\n        \n        else\n          checkCount = 0;\n      }\n      else\n      {\n        checkCount ++;\n        prevRay = currentRay;\n      }\n    }\n    else\n      checkCount = 0;\n\n    if (checkCount >= checkCountMax)\n    {\n      driveMotors.stop(brake);\n      int ballX = sin(BrainInertial.heading(degrees)*M_PI/180) * currentRay;\n      int ballY = cos(BrainInertial.heading(degrees)*M_PI/180) * currentRay;\n\n      ballPos[0] = pos[0] + ballX;\n      ballPos[1] = pos[1] + ballY;\n      return currentRay;\n    }\n\n    currentRay = DistSensor.objectDistance(mm);\n\n  }\n\n  \n\n  driveMotors.stop(brake);\n  BrainInertial.setRotation(BrainInertial.heading(degrees), degrees);\n\n  return -1;\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n//returns magnitude of distance traveled given forward wheels movement\ndouble kiwiToReal(double wheelTurns)\n{\n  double dist = wheelTurns * 188;\n\n  return sin(M_PI/3) * dist;\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * adjusts position as moving towards ball\n */\nvoid goToBall(int pos[])\n{\n  const int STOP_DIST = 120;\n  double angleInRad = BrainInertial.heading(degrees)*M_PI/180;\n  double lastPosLeft = MotorLeft.position(turns);\n  double lastPosRight = MotorRight.position(turns);\n  double overallDeltax = 0;\n  double overallDeltay = 0;\n  double storeHeading = BrainInertial.heading(degrees);\n\n  MotorLeft.setVelocity(20,percent);\n  MotorRight.setVelocity(20,percent);\n  MotorLeft.spin(forward);\n  MotorRight.spin(reverse);\n\n  while (DistSensor.objectDistance(mm) > STOP_DIST)\n  {\n    \n    double deltaLeft = abs(MotorLeft.position(turns) - lastPosLeft);\n    double deltaRight = abs(MotorRight.position(turns) - lastPosRight);\n    double deltaAverage = (deltaLeft + deltaRight) / 2;\n    angleInRad = (BrainInertial.heading(degrees)) * M_PI/180;\n    \n    double deltax = sin(angleInRad) * kiwiToReal(deltaAverage);\n    double deltay = cos(angleInRad) * kiwiToReal(deltaAverage);\n\n    overallDeltax += deltax;\n    overallDeltay += deltay;\n\n    lastPosLeft = MotorLeft.position(turns);\n    lastPosRight = MotorRight.position(turns);\n\n    wait(175, msec);\n    \n  }\n\n  //stop robot \n  MotorLeft.stop(brake);\n  MotorRight.stop(brake);\n  MotorBack.stop(brake);\n\n  //reset heading\n  BrainInertial.setHeading(storeHeading,degrees);\n\n  //adjust robot position\n  pos[0] += overallDeltax;\n  pos[1] += overallDeltay;\n\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * rotates robot 90 degrees\n * takes the directions of rotation as a parameter (-1 = CCW, 1 = CW)\n */\nvoid rotate90 (int direction) {\n\n  //rotate(88*direction);\n  \n  BrainInertial.setRotation(0, degrees);\n  MotorRight.spin(forward,20 * direction,percent);\n  MotorLeft.spin(forward,20 * direction,percent);\n  MotorBack.spin(forward,20 * direction,percent);\n\n  while(abs(BrainInertial.rotation(degrees)) <= 88){}\n  \n  MotorRight.stop();\n  MotorLeft.stop();\n  MotorBack.stop();\n  \n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * calculates angle to strike ball into the closest pocket\n * returns heading in degrees\n */\ndouble findOptimalAngle(double ballX, double ballY, int& pocketNum){\n  // pocketLocation[0][i] = x, pocketLocation[1][i] = y\n  const double pocketLocation[2][6] = {{-558.8, -558.8, -558.8, 558.8, 558.8, 558.8}, {-1117.6, 0, 1117.6, -1117.6, 0, 1117.6}};\n\n  double shortestDistance = 1e8;\n  double optimalAngle = 0;\n  for (int i = 0; i < 6; i++) {\n    double dx = pocketLocation[0][i] - ballX; \n    double dy = pocketLocation[1][i] - ballY; \n    double d = sqrt(pow(dx,2)+ pow(dy,2)); \n  \n    if (d < shortestDistance){\n      shortestDistance = d;\n      pocketNum = i;\n      optimalAngle = atan2(dx,dy) * 180.0 / M_PI;\n\n      if (optimalAngle < 0) {\n        optimalAngle += 360;\n      }\n    }\n  }\n  return optimalAngle;\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * rotates robot about an axis of rotation 50mm infront of the robot\n */\nvoid orbitBall (double targetHeading, int pocketNum)\n{\n  const int FRONT_POWER = 7;\n  const int BACK_POWER = 50;\n  double ERROR_CORRECTION = 0;\n\n  MotorLeft.setVelocity(FRONT_POWER,percent);\n  MotorRight.setVelocity(FRONT_POWER,percent);\n  MotorBack.setVelocity(BACK_POWER,percent);\n  if (pocketNum == 2 || pocketNum == 5){\n    //correct for under rotate on side pockets\n    ERROR_CORRECTION = 0;\n  }\n  else\n  {\n    //correct for over rotate on corner pockets\n    ERROR_CORRECTION = 0;\n  }\n\n  //set target heading to 0 degrees\n  BrainInertial.setRotation((BrainInertial.heading(degrees) -targetHeading),degrees);\n  if (BrainInertial.rotation(degrees) < 0)\n  {\n    BrainInertial.setRotation(BrainInertial.rotation(degrees)+360,degrees);\n  }\n\n  if (BrainInertial.rotation(degrees) - ERROR_CORRECTION > 180)\n  {\n\n    //rotate clockwise\n    while (BrainInertial.rotation(degrees) - ERROR_CORRECTION < 360)\n    {\n      MotorLeft.spin(forward);\n      MotorRight.spin(forward);\n      MotorBack.spin(forward);\n    }\n  }\n  else\n  {\n    //rotate counter-clockwise\n    while (BrainInertial.rotation(degrees) + ERROR_CORRECTION > 0)\n    {\n      MotorLeft.spin(reverse);\n      MotorRight.spin(reverse);\n      MotorBack.spin(reverse);\n    }\n  }\n\n  MotorLeft.stop(brake);\n  MotorRight.stop(brake);\n  MotorBack.stop(brake);\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * maneuvers robot from a corner into the centre of the table\n * resets sensors and motor encoders\n * takes controller inputs to determine which corner the robot starts from\n */\nvoid configureCartesianPlane() \n{\n  int r1 = 0; // cw = 1, ccw = -1\n  int r2 = 0;\n  bool controllerInput = false;\n\n  while (!controllerInput) {\n    if (Controller.ButtonEUp.pressing()) {\n      // top left corner \n      r1 = -1;\n      r2 = -1;\n      controllerInput = true;\n    } else if (Controller.ButtonEDown.pressing()) {\n      // bottom left corner \n      r1 = 1;\n      r2 = -1;\n      controllerInput = true;\n    } else if (Controller.ButtonFDown.pressing()) {\n      // bottom right corner\n      r1 = -1;\n      r2 = 1;\n      controllerInput = true;\n    } else if (Controller.ButtonFUp.pressing()) {\n      // top right corner\n      r1 = 1;\n      r2 = 1;\n      controllerInput = true;\n    }\n  }\n\n  // Moves to center of pool table\n  MotorRight.spin(reverse, 50,percent);\n  MotorLeft.spin(forward,50, percent);\n  while((188 * (MotorLeft.position(degrees)/360.0) * cos(M_PI/6))  <= 1118-440){}\n  MotorRight.stop();\n  MotorLeft.stop();\n\n  rotate90(r1);\n\n  MotorLeft.resetPosition();\n  MotorRight.spin(reverse, 50,percent);\n  MotorLeft.spin(forward,50, percent);\n  while((188 * (MotorLeft.position(degrees)/360.0) * cos(M_PI/6))  <= 558.8-290){}\n  MotorRight.stop();\n  MotorLeft.stop();\n\n  rotate90(r2);\n\n  // Sets origin\n  MotorRight.setPosition(0, degrees);\n  MotorLeft.setPosition(0,degrees);\n  MotorBack.setPosition(0,degrees);\n  BrainInertial.setRotation(0,degrees);\n  //BrainInertial.setHeading(0,degrees);\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * rotates Striker motor to pull bumper into ready position\n * locks bumper in place when finished\n */\nvoid primeStriker()\n{\n  Striker.setVelocity(20,percent);\n  Striker.spin(forward);\n  wait (2,seconds);\n  Striker.stop(hold);\n  Striker.setPosition(0,degrees);\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\n/*\n * spins Striker motor at full speed to extend bumper\n */\nvoid strikeBall()\n{\n  double storeHeading = BrainInertial.heading(degrees);\n\n  //const int MAX_ROTATION = -50;\n\n  MotorLeft.setVelocity(70,percent);\n  MotorRight.setVelocity(70,percent);\n\n  MotorLeft.spin(forward);\n  MotorRight.spin(reverse);\n\n  wait (0.5,seconds);\n\n  Striker.setVelocity(100,percent);\n  Striker.spin(reverse);\n  wait(0.2,seconds);\n\n  MotorLeft.stop();\n  MotorRight.stop();\n\n  wait(0.55, seconds);\n\n  Striker.stop(brake);\n\n  //backtracks to original position\n  MotorLeft.spin(reverse);\n  MotorRight.spin(forward);\n\n  wait (0.5,seconds);\n\n  MotorLeft.stop(brake);\n  MotorRight.stop(brake);\n\n  BrainInertial.setHeading(storeHeading, degrees);\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\nvoid resetCoordinates(int pos[], int tableWidth, int tableLength)\n{\n  int xPos = 0;\n  int yPos = 0;\n\n  MotorLeft.setVelocity(30,percent);\n  MotorRight.setVelocity(30,percent);\n  MotorBack.setVelocity(30,percent);\n\n  MotorLeft.spin(forward);\n  MotorRight.spin(forward);\n  MotorBack.spin(forward);\n  double direction = 0;\n  //reset y coord\n  if (pos[1] >= tableLength/2)\n  {\n    BrainInertial.setRotation(-BrainInertial.heading(degrees),degrees);\n    //while (BrainInertial.rotation(degrees) < 0){}\n    while (!(BrainInertial.heading(degrees) > 358 || BrainInertial.heading(degrees) < 2)){}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n    MotorBack.stop(brake);\n\n    yPos = tableLength - DistSensor.objectDistance(mm) - 85;\n    direction = BrainInertial.heading(degrees);\n    //printf(\"curent heading 1: %f\\n\", direction);\n  }\n  else\n  {\n    BrainInertial.setRotation(-180-BrainInertial.heading(degrees),degrees);\n    //while (BrainInertial.rotation(degrees) < 0){}\n    while (!(BrainInertial.heading(degrees) > 178 && BrainInertial.heading(degrees) < 182)){}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n    MotorBack.stop(brake);\n\n    yPos = DistSensor.objectDistance(mm) + 85;\n    direction = BrainInertial.heading(degrees);\n    //printf(\"curent heading 2: %f\\n\", direction);\n  }\n\n  wait (1, seconds);\n\n  MotorLeft.spin(forward);\n  MotorRight.spin(forward);\n  MotorBack.spin(forward);\n\n  wait(2, seconds);\n\n  //reset x coord\n  if (pos[0] >= tableWidth/2)\n  {\n    BrainInertial.setRotation(-90-BrainInertial.heading(degrees),degrees);\n    //while (BrainInertial.rotation(degrees) < 0){}\n    while (!(BrainInertial.heading(degrees) > 88 && BrainInertial.heading(degrees) < 92)){}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n    MotorBack.stop(brake);\n\n    xPos = tableWidth - DistSensor.objectDistance(mm) - 85;\n    direction = BrainInertial.heading(degrees);\n    //printf(\"curent heading 3: %f\\n\", direction);\n  }\n  else\n  {\n    BrainInertial.setRotation(-270-BrainInertial.heading(degrees),degrees);\n    //while (BrainInertial.rotation(degrees) < 0){}\n    while (!(BrainInertial.heading(degrees) > 268 && BrainInertial.heading(degrees) < 272)){}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n    MotorBack.stop(brake);\n\n    xPos = DistSensor.objectDistance(mm) + 85;\n    direction = BrainInertial.heading(degrees);\n    //printf(\"curent heading 4: %f\\n\", direction);\n  }\n  \n  pos[0] = xPos;\n  pos[1] = yPos;\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\nvoid findBallCentre(int ballDist, int pos[])\n{\n  if (ballDist > 500)\n  {\n    MotorLeft.setVelocity(20,percent);\n    MotorRight.setVelocity(20,percent);\n\n    MotorLeft.spin(forward);\n    MotorRight.spin(reverse);\n\n    while (DistSensor.objectDistance(mm) > 300) {}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n  }\n\n  if (ballDist < 300)\n  {\n    MotorLeft.spin(reverse);\n    MotorRight.spin(forward);\n\n    while (DistSensor.objectDistance(mm) < 300) {}\n\n    MotorLeft.stop(brake);\n    MotorRight.stop(brake);\n  }\n\n  pos[0] += (ballDist - 300) * sin(BrainInertial.heading(degrees)*M_PI/180);\n  pos[1] += (ballDist - 300) * cos(BrainInertial.heading(degrees)*M_PI/180);\n\n  ballDist = 300;\n\n  double leftEdge = 0, rightEdge = 0;\n\n  BrainInertial.setRotation(0,degrees);\n\n  MotorLeft.setVelocity(5,percent);\n  MotorRight.setVelocity(5,percent);\n  MotorBack.setVelocity(5,percent);\n\n  MotorLeft.spin(forward);\n  MotorRight.spin(forward);\n  MotorBack.spin(forward);\n\n  wait(200, msec);\n\n  while (!(abs(DistSensor.objectDistance(mm) - ballDist) < 60)){}\n  while (abs(DistSensor.objectDistance(mm) - ballDist) < 60){}\n\n  MotorRight.stop(brake);\n  MotorLeft.stop(brake);\n  MotorBack.stop(brake);\n\n  rightEdge = BrainInertial.rotation(degrees);\n\n  wait(300, msec);\n\n  MotorLeft.spin(reverse);\n  MotorRight.spin(reverse);\n  MotorBack.spin(reverse);\n\n  wait(400,msec);\n\n  while (!(abs(DistSensor.objectDistance(mm) - ballDist) < 60)){}\n  while (abs(DistSensor.objectDistance(mm) - ballDist) < 60){}\n\n  leftEdge = BrainInertial.rotation(degrees);\n\n  double centreAngle = (rightEdge + leftEdge) / 2;\n\n  wait(500, msec);\n\n  MotorLeft.spin(forward);\n  MotorRight.spin(forward);\n  MotorBack.spin(forward);\n\n  while (BrainInertial.rotation(degrees) < centreAngle){}\n\n  MotorRight.stop(brake);\n  MotorLeft.stop(brake);\n  MotorBack.stop(brake);\n\n}\n\n\n//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\n\nint main() {\n  // Initializing Robot Configuration. DO NOT REMOVE!\n  vexcodeInit();\n  configureAllSensors();\n  Brain.Screen.setFont(mono12); \n\n  //set table dimensions\n  const int TABLE_WIDTH = 1118;\n  const int TABLE_LENGTH = 1118*2;\n\n  //initialize position variables\n  int pos[2] = {TABLE_WIDTH/2, TABLE_LENGTH/2};\n  int ballPos[2] = {0, 0};\n  \n  //pull striking bumper back\n  primeStriker();\n\n  //position robot in centre\n  configureCartesianPlane();\n\n  wait (1, seconds);\n\n  //search for ball, store distance to ball\n  int dist = findBall(pos, TABLE_WIDTH, TABLE_LENGTH, ballPos);\n  \n  Brain.Screen.setCursor(0,1);\n\n  while (dist != -1)\n  {\n    Brain.Screen.newLine();\n    Brain.Screen.print(\"Ball Position: (%d,%d)\", ballPos[0],ballPos[1]);\n\n    Brain.Screen.newLine();\n    Brain.Screen.print(\"Dist to Ball: %d\", dist);\n    findBallCentre(dist, pos);\n\n    wait(1.5, seconds);\n\n    //drive to ball\n    goToBall(pos);\n\n    wait(1.5, seconds);\n\n    //rotate around ball to correct angle\n    int pocketNum = -1;\n    orbitBall(findOptimalAngle (ballPos[0]-TABLE_WIDTH/2,ballPos[1]-TABLE_LENGTH/2, pocketNum),pocketNum);\n    //orbitRobot(findOptimalAngle (ballPos[0]-TABLE_WIDTH/2,ballPos[1]-TABLE_LENGTH/2));\n\n    wait(1.5, seconds);\n\n    //strike ball\n    strikeBall();\n    primeStriker();\n\n    wait(1.5, seconds);\n\n    //reset position using walls as reference\n    resetCoordinates(pos, TABLE_WIDTH, TABLE_LENGTH);\n    Brain.Screen.newLine();\n    Brain.Screen.print(\"Robot Position: (%d,%d)\", pos[0],pos[1]);\n\n    wait(1.5, seconds);\n\n    //returnToOrigin (pos, TABLE_WIDTH, TABLE_LENGTH);\n\n    dist = findBall(pos, TABLE_WIDTH, TABLE_LENGTH, ballPos);\n    //dist = -1;\n    \n  }\n\n  Brain.playSound(tada);\n  BrainInertial.setRotation(0,degrees);\n  MotorLeft.setVelocity(50,percent);\n  MotorRight.setVelocity(50,percent);\n  MotorBack.setVelocity(50,percent);\n  for (int i=0; i<3; i++)\n  {\n    MotorLeft.spin(forward);\n    MotorRight.spin(forward);\n    MotorBack.spin(forward);\n\n    while (BrainInertial.rotation(degrees) < 10) {}\n\n    MotorLeft.spin(reverse);\n    MotorRight.spin(reverse);\n    MotorBack.spin(reverse);\n\n    while (BrainInertial.rotation(degrees) > -10) {}\n  }\n  Brain.playSound(powerDown);\n\n  MotorLeft.stop(brake);\n  MotorRight.stop(brake);\n  MotorBack.stop(brake);\n\n  wait (1, seconds);\n\n  Brain.programStop();\n  return EXIT_SUCCESS;\n  \n}\n","textLanguage":"cpp","robotConfig":[{"port":[12],"name":"MotorLeft","customName":true,"deviceType":"Motor","deviceClass":"motor","setting":{"reversed":"false","fwd":"forward","rev":"reverse"},"triportSourcePort":22},{"port":[8],"name":"MotorRight","customName":true,"deviceType":"Motor","deviceClass":"motor","setting":{"reversed":"false","fwd":"forward","rev":"reverse"},"triportSourcePort":22},{"port":[3],"name":"MotorBack","customName":true,"deviceType":"Motor","deviceClass":"motor","setting":{"reversed":"false","fwd":"forward","rev":"reverse"},"triportSourcePort":22},{"port":[11],"name":"Striker","customName":true,"deviceType":"Motor","deviceClass":"motor","setting":{"reversed":"false","fwd":"forward","rev":"reverse"},"triportSourcePort":22},{"port":[4],"name":"DistSensor","customName":true,"deviceType":"Distance","deviceClass":"distance","setting":{},"triportSourcePort":22},{"port":[5],"name":"TouchLED5","customName":false,"deviceType":"TouchLED","deviceClass":"touchled","setting":{},"triportSourcePort":22},{"port":[],"name":"Controller","customName":false,"deviceType":"Controller","deviceClass":"controller","setting":{"left":"","leftDir":"false","right":"","rightDir":"false","e":"","eDir":"false","f":"","fDir":"false","l3r3":"","l3r3Dir":"false","drive":"none"},"triportSourcePort":22}],"slot":4,"platform":"IQ","sdkVersion":"20230818.11.00.00","appVersion":"4.62.0","fileFormat":"2.0.0","targetBrainGen":"Second","v5SoundsEnabled":false,"aiVisionSettings":{"colors":[],"codes":[],"tags":true,"AIObjects":true,"AIObjectModel":[],"aiModelDropDownValue":null}}
+#pragma region VEXcode Generated Robot Configuration
+// Make sure all required headers are included.
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <math.h>
+#include <string.h>
+
+#include "vex.h"
+
+using namespace vex;
+
+// Brain should be defined by default
+brain Brain;
+
+// START IQ MACROS
+#define waitUntil(condition)                                                   \
+  do {                                                                         \
+    wait(5, msec);                                                             \
+  } while (!(condition))
+
+#define repeat(iterations)                                                     \
+  for (int iterator = 0; iterator < iterations; iterator++)
+// END IQ MACROS
+
+// Robot configuration code.
+inertial BrainInertial = inertial();
+motor MotorLeft = motor(PORT12, false);
+motor MotorRight = motor(PORT8, false);
+motor MotorBack = motor(PORT3, false);
+motor Striker = motor(PORT11, false);
+distance DistSensor = distance(PORT4);
+touchled TouchLED5 = touchled(PORT5);
+controller Controller = controller();
+
+// generating and setting random seed
+void initializeRandomSeed(){
+  wait(100,msec);
+  double xAxis = BrainInertial.acceleration(xaxis) * 1000;
+  double yAxis = BrainInertial.acceleration(yaxis) * 1000;
+  double zAxis = BrainInertial.acceleration(zaxis) * 1000;
+  // Combine these values into a single integer
+  int seed = int(
+    xAxis + yAxis + zAxis
+  );
+  // Set the seed
+  srand(seed); 
+}
+
+void vexcodeInit() {
+
+  // Initializing random seed.
+  initializeRandomSeed(); 
+}
+
+// define variable for remote controller enable/disable
+bool RemoteControlCodeEnabled = true;
+
+#pragma endregion VEXcode Generated Robot Configuration
+
+//----------------------------------------------------------------------------
+//                                                                           
+//    Module:       main.cpp                                                  
+//    Author:       Mathew Chan, Seunghee Choi, Jun Kim, Austin Li                                                 
+//    Created:      {date}                                                    
+//    Description:  AUTONOMOUS POOL ROBOT                                               
+//                                                                           
+//----------------------------------------------------------------------------
+
+// Include the IQ Library
+#include "iq_cpp.h"
+#include "cmath"
+#include "cstdio"
+
+// Allows for easier use of the VEX Library
+using namespace vex;
+
+//function prototypes
+int projectRay(int pos[], int tableWidth, int tableLength);
+int findBall (int pos[], int tableWidth, int tableLength);
+double kiwiToReal(double wheelTurns);
+void goToBall(int pos[]);
+void rotate90 (int direction);
+void configureAllSensors();
+double findOptimalAngle(double ballX, double ballY, int& pocketNum);
+void orbitBall (double targetHeading, int pocketNum);
+void configureCartesianPlane();
+void primeStriker();
+void strikeBall();
+void resetCoordinates(int pos[], int tableWidth, int tableLength);
+void findBallCentre(int ballDist);
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+//finds distance to wall from robot
+int projectRay(int pos[], int tableWidth, int tableLength)
+{
+  const int SENSOR_OFFSET = 105;
+  double angleInRad = BrainInertial.heading(degrees)*M_PI/180;
+  double xdist = 0, ydist = 0, dist = 0;
+
+  bool pointingUp = BrainInertial.heading(degrees) <= 90 || BrainInertial.heading(degrees) >= 270;
+
+  bool pointingRight = BrainInertial.heading(degrees) <=180;
+
+  //if pointing "up-right"
+  if (pointingUp && pointingRight)
+  {
+    xdist = tan(angleInRad) * (tableLength-pos[1]);
+    ydist = (tableWidth-pos[0]) / tan(angleInRad);
+
+    xdist = fmin (xdist, tableWidth-pos[0]);
+    ydist = fmin (ydist, tableLength-pos[1]);
+  }
+
+  //if pointing "down-right"
+  if (!pointingUp && pointingRight)
+  {
+    double refAngle = angleInRad - (M_PI/2);
+
+    xdist = pos[1] / tan(refAngle);
+    ydist = tan(refAngle) * (tableWidth-pos[0]);
+
+    xdist = fmin (xdist, tableWidth-pos[0]);
+    ydist = fmin (ydist, pos[1]);
+  }
+
+  // if pointing "down-left"
+  if (!pointingUp && !pointingRight)
+  {
+    double refAngle = angleInRad - (M_PI);
+
+    xdist = tan(refAngle) * pos[1];
+    ydist = pos[0] / tan(refAngle);
+
+    xdist = fmin (xdist, pos[0]);
+    ydist = fmin (ydist, pos[1]);
+  }
+
+  //if pointing "up-left"
+  if (pointingUp && !pointingRight)
+  {
+    double refAngle = angleInRad - (3*M_PI/2);
+    
+    xdist = (tableLength-pos[1]) / tan(refAngle);
+    ydist = tan(refAngle) * pos[0];
+
+    xdist = fmin (xdist, pos[0]);
+    ydist = fmin (ydist, tableLength-pos[1]);
+  }
+
+  //calculate distance to wall minus sensor offset
+  dist = sqrt (pow(xdist,2) + pow(ydist,2)) - SENSOR_OFFSET;
+
+  return (int) dist;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+void configureAllSensors()
+{
+  BrainInertial.calibrate();
+  wait(2,seconds);
+  BrainInertial.setHeading(0,degrees);
+  BrainInertial.setRotation(0,degrees);
+  MotorRight.setPosition(0,degrees);
+  MotorLeft.setPosition(0,degrees);
+  MotorBack.setPosition(0,degrees);
+  Striker.setPosition(0,degrees);
+  Brain.Timer.reset();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * returns -1 if no ball found
+ * returns distance to ball in mm
+ * calculates position of ball
+ */
+int findBall (int pos[], int tableWidth, int tableLength, int ballPos[])
+{
+  //already in position
+  const int MARGIN = 150;
+  const int PROXIMITY_MARGIN = 70;
+  const int checkCountMax = 40;
+  int checkCount = 0;
+
+  int currentRay = DistSensor.objectDistance(mm);
+  int prevRay = projectRay (pos, tableWidth, tableLength);
+
+  motor_group driveMotors(MotorLeft,MotorRight,MotorBack);
+
+  BrainInertial.setRotation(0,degrees);
+  driveMotors.setVelocity(15,percent);
+  driveMotors.spin(forward);
+
+  while (abs(BrainInertial.rotation(degrees)) < 360)
+  {
+
+    if (currentRay < projectRay (pos, tableWidth, tableLength) - MARGIN)
+    {
+      if (checkCount >= 1)
+      {
+        if (abs(currentRay - prevRay) <= PROXIMITY_MARGIN)
+          checkCount ++;
+        
+        else
+          checkCount = 0;
+      }
+      else
+      {
+        checkCount ++;
+        prevRay = currentRay;
+      }
+    }
+    else
+      checkCount = 0;
+
+    if (checkCount >= checkCountMax)
+    {
+      driveMotors.stop(brake);
+      int ballX = sin(BrainInertial.heading(degrees)*M_PI/180) * currentRay;
+      int ballY = cos(BrainInertial.heading(degrees)*M_PI/180) * currentRay;
+
+      ballPos[0] = pos[0] + ballX;
+      ballPos[1] = pos[1] + ballY;
+      return currentRay;
+    }
+
+    currentRay = DistSensor.objectDistance(mm);
+
+  }
+
+  
+  driveMotors.stop(brake);
+  BrainInertial.setRotation(BrainInertial.heading(degrees), degrees);
+
+  return -1;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+//returns magnitude of distance traveled given forward wheels movement
+double kiwiToReal(double wheelTurns)
+{
+  double dist = wheelTurns * 188;
+
+  return sin(M_PI/3) * dist;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * adjusts position as moving towards ball
+ */
+void goToBall(int pos[])
+{
+  const int STOP_DIST = 120;
+  double angleInRad = BrainInertial.heading(degrees)*M_PI/180;
+  double lastPosLeft = MotorLeft.position(turns);
+  double lastPosRight = MotorRight.position(turns);
+  double overallDeltax = 0;
+  double overallDeltay = 0;
+  double storeHeading = BrainInertial.heading(degrees);
+
+  MotorLeft.setVelocity(20,percent);
+  MotorRight.setVelocity(20,percent);
+  MotorLeft.spin(forward);
+  MotorRight.spin(reverse);
+
+  while (DistSensor.objectDistance(mm) > STOP_DIST)
+  {
+    
+    double deltaLeft = abs(MotorLeft.position(turns) - lastPosLeft);
+    double deltaRight = abs(MotorRight.position(turns) - lastPosRight);
+    double deltaAverage = (deltaLeft + deltaRight) / 2;
+    angleInRad = (BrainInertial.heading(degrees)) * M_PI/180;
+    
+    double deltax = sin(angleInRad) * kiwiToReal(deltaAverage);
+    double deltay = cos(angleInRad) * kiwiToReal(deltaAverage);
+
+    overallDeltax += deltax;
+    overallDeltay += deltay;
+
+    lastPosLeft = MotorLeft.position(turns);
+    lastPosRight = MotorRight.position(turns);
+
+    wait(175, msec);
+    
+  }
+
+  //stop robot 
+  MotorLeft.stop(brake);
+  MotorRight.stop(brake);
+  MotorBack.stop(brake);
+
+  //reset heading
+  BrainInertial.setHeading(storeHeading,degrees);
+
+  //adjust robot position
+  pos[0] += overallDeltax;
+  pos[1] += overallDeltay;
+
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * rotates robot 90 degrees
+ * takes the directions of rotation as a parameter (-1 = CCW, 1 = CW)
+ */
+void rotate90 (int direction) {
+
+  BrainInertial.setRotation(0, degrees);
+  MotorRight.spin(forward,20 * direction,percent);
+  MotorLeft.spin(forward,20 * direction,percent);
+  MotorBack.spin(forward,20 * direction,percent);
+
+  while(abs(BrainInertial.rotation(degrees)) <= 88){}
+
+  MotorRight.stop();
+  MotorLeft.stop();
+  MotorBack.stop();
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * calculates angle to strike ball into the closest pocket
+ * returns heading in degrees
+ */
+double findOptimalAngle(double ballX, double ballY, int& pocketNum){
+  // pocketLocation[0][i] = x, pocketLocation[1][i] = y
+  const double pocketLocation[2][6] = {{-558.8, -558.8, -558.8, 558.8, 558.8, 558.8}, {-1117.6, 0, 1117.6, -1117.6, 0, 1117.6}};
+
+  double shortestDistance = 1e8;
+  double optimalAngle = 0;
+  for (int i = 0; i < 6; i++) {
+    double dx = pocketLocation[0][i] - ballX; 
+    double dy = pocketLocation[1][i] - ballY; 
+    double d = sqrt(pow(dx,2)+ pow(dy,2)); 
+  
+    if (d < shortestDistance){
+      shortestDistance = d;
+      pocketNum = i;
+      optimalAngle = atan2(dx,dy) * 180.0 / M_PI;
+
+      if (optimalAngle < 0) {
+        optimalAngle += 360;
+      }
+    }
+  }
+  return optimalAngle;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * rotates robot about an axis of rotation 50mm in front of the robot
+ */
+void orbitBall (double targetHeading, int pocketNum)
+{
+  const int FRONT_POWER = 7;
+  const int BACK_POWER = 50;
+  double ERROR_CORRECTION = 0;
+
+  MotorLeft.setVelocity(FRONT_POWER,percent);
+  MotorRight.setVelocity(FRONT_POWER,percent);
+  MotorBack.setVelocity(BACK_POWER,percent);
+  if (pocketNum == 2 || pocketNum == 5){
+    //correct for under rotate on side pockets
+    ERROR_CORRECTION = 0;
+  }
+  else
+  {
+    //correct for over rotate on corner pockets
+    ERROR_CORRECTION = 0;
+  }
+
+  //set target heading to 0 degrees
+  BrainInertial.setRotation((BrainInertial.heading(degrees) -targetHeading),degrees);
+  if (BrainInertial.rotation(degrees) < 0)
+  {
+    BrainInertial.setRotation(BrainInertial.rotation(degrees)+360,degrees);
+  }
+
+  if (BrainInertial.rotation(degrees) - ERROR_CORRECTION > 180)
+  {
+    //rotate clockwise
+    while (BrainInertial.rotation(degrees) - ERROR_CORRECTION < 360)
+    {
+      MotorLeft.spin(forward);
+      MotorRight.spin(forward);
+      MotorBack.spin(forward);
+    }
+  }
+  else
+  {
+    //rotate counter-clockwise
+    while (BrainInertial.rotation(degrees) + ERROR_CORRECTION > 0)
+    {
+      MotorLeft.spin(reverse);
+      MotorRight.spin(reverse);
+      MotorBack.spin(reverse);
+    }
+  }
+
+  MotorLeft.stop(brake);
+  MotorRight.stop(brake);
+  MotorBack.stop(brake);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * maneuvers robot from a corner into the centre of the table
+ * resets sensors and motor encoders
+ * takes controller inputs to determine which corner the robot starts from
+ */
+void configureCartesianPlane() 
+{
+  int r1 = 0; // cw = 1, ccw = -1
+  int r2 = 0;
+  bool controllerInput = false;
+
+  while (!controllerInput) {
+    if (Controller.ButtonEUp.pressing()) {
+      // top left corner 
+      r1 = -1;
+      r2 = -1;
+      controllerInput = true;
+    } else if (Controller.ButtonEDown.pressing()) {
+      // bottom left corner 
+      r1 = 1;
+      r2 = -1;
+      controllerInput = true;
+    } else if (Controller.ButtonFDown.pressing()) {
+      // bottom right corner
+      r1 = -1;
+      r2 = 1;
+      controllerInput = true;
+    } else if (Controller.ButtonFUp.pressing()) {
+      // top right corner
+      r1 = 1;
+      r2 = 1;
+      controllerInput = true;
+    }
+  }
+
+  // Moves to center of pool table
+  MotorRight.spin(reverse, 50,percent);
+  MotorLeft.spin(forward,50, percent);
+  while((188 * (MotorLeft.position(degrees)/360.0) * cos(M_PI/6))  <= 1118-440){}
+  MotorRight.stop();
+  MotorLeft.stop();
+
+  rotate90(r1);
+
+  MotorLeft.resetPosition();
+  MotorRight.spin(reverse, 50,percent);
+  MotorLeft.spin(forward,50, percent);
+  while((188 * (MotorLeft.position(degrees)/360.0) * cos(M_PI/6))  <= 558.8-290){}
+  MotorRight.stop();
+  MotorLeft.stop();
+
+  rotate90(r2);
+
+  // Sets origin
+  MotorRight.setPosition(0, degrees);
+  MotorLeft.setPosition(0,degrees);
+  MotorBack.setPosition(0,degrees);
+  BrainInertial.setRotation(0,degrees);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * rotates Striker motor to pull bumper into ready position
+ * locks bumper in place when finished
+ */
+void primeStriker()
+{
+  Striker.setVelocity(20,percent);
+  Striker.spin(forward);
+  wait (2,seconds);
+  Striker.stop(hold);
+  Striker.setPosition(0,degrees);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/*
+ * spins Striker motor at full speed to extend bumper
+ */
+void strikeBall()
+{
+  double storeHeading = BrainInertial.heading(degrees);
+
+  MotorLeft.setVelocity(70,percent);
+  MotorRight.setVelocity(70,percent);
+
+  MotorLeft.spin(forward);
+  MotorRight.spin(reverse);
+
+  wait (0.5,seconds);
+
+  Striker.setVelocity(100,percent);
+  Striker.spin(reverse);
+  wait(0.2,seconds);
+
+  MotorLeft.stop();
+  MotorRight.stop();
+
+  wait(0.55, seconds);
+
+  Striker.stop(brake);
+
+  //backtracks to original position
+  MotorLeft.spin(reverse);
+  MotorRight.spin(forward);
+
+  wait (0.5,seconds);
+
+  MotorLeft.stop(brake);
+  MotorRight.stop(brake);
+
+  BrainInertial.setHeading(storeHeading, degrees);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+void resetCoordinates(int pos[], int tableWidth, int tableLength)
+{
+  int xPos = 0;
+  int yPos = 0;
+
+  MotorLeft.setVelocity(30,percent);
+  MotorRight.setVelocity(30,percent);
+  MotorBack.setVelocity(30,percent);
+
+  MotorLeft.spin(forward);
+  MotorRight.spin(forward);
+  MotorBack.spin(forward);
+  double direction = 0;
+
+  //reset y coord
+  if (pos[1] >= tableLength/2)
+  {
+    BrainInertial.setRotation(-BrainInertial.heading(degrees),degrees);
+    while (!(BrainInertial.heading(degrees) > 358 || BrainInertial.heading(degrees) < 2)){}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+    MotorBack.stop(brake);
+
+    yPos = tableLength - DistSensor.objectDistance(mm) - 85;
+    direction = BrainInertial.heading(degrees);
+  }
+  else
+  {
+    BrainInertial.setRotation(-180-BrainInertial.heading(degrees),degrees);
+    while (!(BrainInertial.heading(degrees) > 178 && BrainInertial.heading(degrees) < 182)){}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+    MotorBack.stop(brake);
+
+    yPos = DistSensor.objectDistance(mm) + 85;
+    direction = BrainInertial.heading(degrees);
+  }
+
+  wait (1, seconds);
+
+  MotorLeft.spin(forward);
+  MotorRight.spin(forward);
+  MotorBack.spin(forward);
+
+  wait(2, seconds);
+
+  //reset x coord
+  if (pos[0] >= tableWidth/2)
+  {
+    BrainInertial.setRotation(-90-BrainInertial.heading(degrees),degrees);
+    while (!(BrainInertial.heading(degrees) > 88 && BrainInertial.heading(degrees) < 92)){}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+    MotorBack.stop(brake);
+
+    xPos = tableWidth - DistSensor.objectDistance(mm) - 85;
+    direction = BrainInertial.heading(degrees);
+  }
+  else
+  {
+    BrainInertial.setRotation(-270-BrainInertial.heading(degrees),degrees);
+    while (!(BrainInertial.heading(degrees) > 268 && BrainInertial.heading(degrees) < 272)){}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+    MotorBack.stop(brake);
+
+    xPos = DistSensor.objectDistance(mm) + 85;
+    direction = BrainInertial.heading(degrees);
+  }
+  
+  pos[0] = xPos;
+  pos[1] = yPos;
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+void findBallCentre(int ballDist, int pos[])
+{
+  if (ballDist > 500)
+  {
+    MotorLeft.setVelocity(20,percent);
+    MotorRight.setVelocity(20,percent);
+
+    MotorLeft.spin(forward);
+    MotorRight.spin(reverse);
+
+    while (DistSensor.objectDistance(mm) > 300) {}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+  }
+
+  if (ballDist < 300)
+  {
+    MotorLeft.spin(reverse);
+    MotorRight.spin(forward);
+
+    while (DistSensor.objectDistance(mm) < 300) {}
+
+    MotorLeft.stop(brake);
+    MotorRight.stop(brake);
+  }
+
+  pos[0] += (ballDist - 300) * sin(BrainInertial.heading(degrees)*M_PI/180);
+  pos[1] += (ballDist - 300) * cos(BrainInertial.heading(degrees)*M_PI/180);
+
+  ballDist = 300;
+
+  double leftEdge = 0, rightEdge = 0;
+
+  BrainInertial.setRotation(0,degrees);
+
+  MotorLeft.setVelocity(5,percent);
+  MotorRight.setVelocity(5,percent);
+  MotorBack.setVelocity(5,percent);
+
+  MotorLeft.spin(forward);
+  MotorRight.spin(forward);
+  MotorBack.spin(forward);
+
+  wait(200, msec);
+
+  while (!(abs(DistSensor.objectDistance(mm) - ballDist) < 60)){}
+  while (abs(DistSensor.objectDistance(mm) - ballDist) < 60){}
+
+  MotorRight.stop(brake);
+  MotorLeft.stop(brake);
+  MotorBack.stop(brake);
+
+  rightEdge = BrainInertial.rotation(degrees);
+
+  wait(300, msec);
+
+  MotorLeft.spin(reverse);
+  MotorRight.spin(reverse);
+  MotorBack.spin(reverse);
+
+  wait(400,msec);
+
+  while (!(abs(DistSensor.objectDistance(mm) - ballDist) < 60)){}
+  while (abs(DistSensor.objectDistance(mm) - ballDist) < 60){}
+
+  leftEdge = BrainInertial.rotation(degrees);
+
+  double centreAngle = (rightEdge + leftEdge) / 2;
+
+  wait(500, msec);
+
+  MotorLeft.spin(forward);
+  MotorRight.spin(forward);
+  MotorBack.spin(forward);
+
+  while (BrainInertial.rotation(degrees) < centreAngle){}
+
+  MotorRight.stop(brake);
+  MotorLeft.stop(brake);
+  MotorBack.stop(brake);
+}
+
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+int main() {
+  // Initializing Robot Configuration. DO NOT REMOVE!
+  vexcodeInit();
+  configureAllSensors();
+  Brain.Screen.setFont(mono12); 
+
+  //set table dimensions
+  const int TABLE_WIDTH = 1118;
+  const int TABLE_LENGTH = 1118*2;
+
+  //initialize position variables
+  int pos[2] = {TABLE_WIDTH/2, TABLE_LENGTH/2};
+  int ballPos[2] = {0, 0};
+  
+  //pull striking bumper back
+  primeStriker();
+
+  //position robot in centre
+  configureCartesianPlane();
+
+  wait (1, seconds);
+
+  //search for ball, store distance to ball
+  int dist = findBall(pos, TABLE_WIDTH, TABLE_LENGTH, ballPos);
+  
+  Brain.Screen.setCursor(0,1);
+
+  while (dist != -1)
+  {
+    Brain.Screen.newLine();
+    Brain.Screen.print("Ball Position: (%d,%d)", ballPos[0],ballPos[1]);
+
+    Brain.Screen.newLine();
+    Brain.Screen.print("Dist to Ball: %d", dist);
+    findBallCentre(dist, pos);
+
+    wait(1.5, seconds);
+
+    //drive to ball
+    goToBall(pos);
+
+    wait(1.5, seconds);
+
+    //rotate around ball to correct angle
+    int pocketNum = -1;
+    orbitBall(findOptimalAngle (ballPos[0]-TABLE_WIDTH/2,ballPos[1]-TABLE_LENGTH/2, pocketNum),pocketNum);
+
+    wait(1.5, seconds);
+
+    //strike ball
+    strikeBall();
+    primeStriker();
+
+    wait(1.5, seconds);
+
+    //reset position using walls as reference
+    resetCoordinates(pos, TABLE_WIDTH, TABLE_LENGTH);
+    Brain.Screen.newLine();
+    Brain.Screen.print("Robot Position: (%d,%d)", pos[0],pos[1]);
+
+    wait(1.5, seconds);
+
+    dist = findBall(pos, TABLE_WIDTH, TABLE_LENGTH, ballPos);
+  }
+
+  Brain.playSound(tada);
+  BrainInertial.setRotation(0,degrees);
+  MotorLeft.setVelocity(50,percent);
+  MotorRight.setVelocity(50,percent);
+  MotorBack.setVelocity(50,percent);
+  for (int i=0; i<3; i++)
+  {
+    MotorLeft.spin(forward);
+    MotorRight.spin(forward);
+    MotorBack.spin(forward);
+
+    while (BrainInertial.rotation(degrees) < 10) {}
+
+    MotorLeft.spin(reverse);
+    MotorRight.spin(reverse);
+    MotorBack.spin(reverse);
+
+    while (BrainInertial.rotation(degrees) > -10) {}
+  }
+  Brain.playSound(powerDown);
+
+  MotorLeft.stop(brake);
+  MotorRight.stop(brake);
+  MotorBack.stop(brake);
+
+  wait (1, seconds);
+
+  Brain.programStop();
+  return EXIT_SUCCESS;
+}
